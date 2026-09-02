@@ -239,13 +239,20 @@ install_app() {
 }
 
 build_whisper() {
-  # whisper.cpp aus der Quelle kompilieren – dieselbe Engine-Familie, die auch
-  # Handy (transcribe-cpp) nutzt. Reines CPU-Target (kein CUDA/hip), läuft
-  # daher auf jedem x86_64-Host ohne Treiber-Anforderungen.
-  if [[ -x /usr/local/bin/whisper-cli ]]; then
-    msg_ok "whisper-cli bereits vorhanden – Update nur bei Fehlen."
-    msg_ok "whisper-cli bereits vorhanden ($( /usr/local/bin/whisper-cli --help 2>&1 | head -n1 | grep -o 'whisper-cli.*' || echo 'Version unbekannt'))."
-    return 0
+  # whisper.cpp STATISCH kompilieren: whisper-cli wird ein in sich
+  # geschlossenes Binary ohne libwhisper.so.1/libggml-Abhängigkeiten.
+  # (Eine shared-Binary bricht, sobald das Build-Verzeichnis gelöscht wird:
+  #  "libwhisper.so.1: cannot open shared object file".)
+  local bin="/usr/local/bin/whisper-cli"
+  if [[ -x "$bin" ]]; then
+    if [[ "${FORCE_REBUILD:-0}" == "1" ]]; then
+      msg_warn "FORCE_REBUILD=1 – baue whisper-cli neu …"
+    elif "$bin" --help >/dev/null 2>&1; then
+      msg_ok "whisper-cli vorhanden und lauffähig."
+      return 0
+    else
+      msg_warn "whisper-cli vorhanden, aber NICHT lauffähig (Libs fehlen?) – baue statisch neu."
+    fi
   fi
   local src="/tmp/whisper.cpp"
   rm -rf "$src"
@@ -254,8 +261,9 @@ build_whisper() {
   cd "$src"
   local nproc_build
   nproc_build="$(nproc)"
-  msg_info "Konfiguriere und kompiliere whisper-cli (cmake -j${nproc_build}, ~2-5 Minuten) …"
-  if ! cmake -B build -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON -DGGML_NATIVE=ON \
+  msg_info "Konfiguriere und kompiliere whisper-cli statisch (cmake -j${nproc_build}, ~2-5 Minuten) …"
+  if ! cmake -B build -DBUILD_SHARED_LIBS=OFF -DWHISPER_BUILD_TESTS=OFF \
+         -DWHISPER_BUILD_EXAMPLES=ON -DGGML_NATIVE=ON \
          > /tmp/whisper-build.log 2>&1; then
     msg_error "cmake-Konfiguration fehlgeschlagen – letzte 60 Zeilen:"
     tail -n 60 /tmp/whisper-build.log >&2 || true
@@ -267,8 +275,15 @@ build_whisper() {
     die "whisper.cpp Build fehlgeschlagen."
   fi
   [[ -x build/bin/whisper-cli ]] || die "build/bin/whisper-cli fehlt nach Build (Log: /tmp/whisper-build.log)."
-  install -m 755 build/bin/whisper-cli /usr/local/bin/whisper-cli
-  msg_ok "whisper-cli installiert."
+  install -m 755 build/bin/whisper-cli "$bin"
+  # Verifikation VOR dem Löschen des Quellverzeichnisses: Binary muss
+  # vollständig lauffähig sein (statisch ⇒ unabhängig vom Build-Ordner).
+  if ! "$bin" --help >/dev/null 2>&1; then
+    msg_error "whisper-cli läuft nach Installation nicht:"
+    "$bin" --version 2>&1 | head -n 3 >&2 || true
+    die "whisper-cli nicht lauffähig (Log: /tmp/whisper-build.log)."
+  fi
+  msg_ok "whisper-cli statisch installiert und lauffähig: $bin"
   cd /
   rm -rf "$src"
 }
@@ -529,7 +544,9 @@ verify_service_and_web() {
 }
 
 print_guest_summary() {
-  local ip="${CT_IP:-127.0.0.1}"
+  # CT_IP kommt als Env vom Host; Fallback für manuelle Aufrufe im Container:
+  local ip="${CT_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+  ip="${ip:-127.0.0.1}"
   cat <<SUMMARY
 
 =========================================================
@@ -712,6 +729,12 @@ ensure_debian_template() {
 validate_settings() {
   if ! [[ "$WEB_PORT" =~ ^[0-9]+$ ]] || (( WEB_PORT < 1024 || WEB_PORT > 65535 )); then
     die "WEB_PORT muss zwischen 1024 und 65535 liegen (ist: ${WEB_PORT})."
+  fi
+  if ! [[ "$TLS_PORT" =~ ^[0-9]+$ ]] || (( TLS_PORT < 1024 || TLS_PORT > 65535 )); then
+    die "TLS_PORT muss zwischen 1024 und 65535 liegen (ist: ${TLS_PORT})."
+  fi
+  if [[ "$TLS_PORT" == "$WEB_PORT" ]]; then
+    die "TLS_PORT (${TLS_PORT}) und WEB_PORT (${WEB_PORT}) dürfen nicht identisch sein."
   fi
   [[ "$NET_MODE" == "dhcp" || "$NET_MODE" == "static" ]] || die "NET_MODE muss 'dhcp' oder 'static' sein."
 }
