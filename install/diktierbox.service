@@ -1,0 +1,40 @@
+[Unit]
+Description=Diktierbox – lokale Spracherkennung (whisper.cpp) mit Web-UI
+Documentation=https://github.com/HatchetMan111/DiktierBoxProxmox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=diktierbox
+Group=diktierbox
+WorkingDirectory=/opt/diktierbox
+Environment=PYTHONUNBUFFERED=1
+Environment=DIKTIERBOX_APP_ROOT=/opt/diktierbox
+Environment=DIKTIERBOX_STATIC_DIR=/opt/diktierbox/static
+Environment=DIKTIERBOX_DATA_DIR=/var/lib/diktierbox
+Environment=DIKTIERBOX_MODELS_DIR=/var/lib/diktierbox/models
+Environment=DIKTIERBOX_TMP_DIR=/var/lib/diktierbox/tmp
+Environment=DIKTIERBOX_HISTORY_DIR=/var/lib/diktierbox/history
+Environment=DIKTIERBOX_WHISPER_BIN=/usr/local/bin/whisper-cli
+Environment=DIKTIERBOX_FFMPEG_BIN=/usr/bin/ffmpeg
+Environment=DIKTIERBOX_DEFAULT_MODEL=ggml-small.bin
+Environment=DIKTIERBOX_LANGUAGE=auto
+Environment=HOME=/var/lib/diktierbox
+ExecStart=/opt/diktierbox/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8080 --timeout-graceful-shutdown 10
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Härtung: kein Root, Schreibzugriff nur auf die Datenverzeichnisse.
+# curl (Modell-Download) läuft als User diktierbox und schreibt nach
+# /var/lib/diktierbox/models – durch ReadWritePaths erlaubt.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/diktierbox
+
+[Install]
+WantedBy=multi-user.target

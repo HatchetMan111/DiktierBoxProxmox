@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diktierbox – Lokales Speech-to-Text</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171c22; --panel2: #1e242c; --border: #2a323d;
+    --text: #e6ebf2; --muted: #8b98a8; --accent: #4da3ff; --accent2: #2f7dd1;
+    --ok: #3ecf7a; --warn: #f0b64a; --err: #ff6b6b; --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center;
+  }
+  header { width: 100%; padding: 18px 20px 10px; text-align: center; }
+  header h1 { margin: 0; font-size: 1.5rem; letter-spacing: .3px; }
+  header p { margin: 4px 0 0; color: var(--muted); font-size: .85rem; }
+  main { width: 100%; max-width: 880px; padding: 10px 16px 60px; display: flex; flex-direction: column; gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+  .card h2 { margin: 0 0 12px; font-size: 1.05rem; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 16px; font-size: .95rem; cursor: pointer;
+    transition: background .15s, border-color .15s;
+  }
+  button:hover:not(:disabled) { background: #263038; border-color: var(--accent2); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent2); border-color: var(--accent2); }
+  button.primary:hover:not(:disabled) { background: var(--accent); }
+  button.rec { background: var(--err); border-color: var(--err); color: #fff; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.72} }
+  select, input[type=text] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 10px; font-size: .95rem;
+  }
+  .hint { color: var(--muted); font-size: .82rem; }
+  .banner { border-radius: var(--radius); padding: 12px 16px; font-size: .88rem; border: 1px solid; }
+  .banner.warn { background: rgba(240,182,74,.08); border-color: var(--warn); color: var(--warn); }
+  .banner.info { background: rgba(77,163,255,.08); border-color: var(--accent2); color: var(--accent); }
+  #result { margin-top: 14px; white-space: pre-wrap; line-height: 1.55; font-size: 1rem; }
+  #result .seg { display: block; padding: 3px 0; border-bottom: 1px dashed var(--border); }
+  #result .seg time { color: var(--muted); font-size: .75rem; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-style: italic; }
+  .status { font-size: .85rem; color: var(--muted); }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: .75rem; border: 1px solid var(--border); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.err { color: var(--err); border-color: var(--err); }
+  .pill.run { color: var(--accent); border-color: var(--accent); }
+  .model-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .model-row:last-child { border-bottom: none; }
+  .model-row .meta { color: var(--muted); font-size: .8rem; }
+  .progress { width: 160px; height: 8px; background: var(--panel2); border-radius: 999px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--accent); transition: width .4s; }
+  #history { max-height: 420px; overflow-y: auto; }
+  .hist-entry { padding: 10px 0; border-bottom: 1px solid var(--border); font-size: .9rem; }
+  .hist-entry .meta { color: var(--muted); font-size: .75rem; margin-bottom: 4px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .hist-entry .text { white-space: pre-wrap; cursor: pointer; }
+  .hist-entry .text:hover { color: var(--accent); }
+  .spin { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -2px; margin-right: 6px;}
+  @keyframes rot { to { transform: rotate(360deg); } }
+  footer { margin-top: auto; padding: 16px; color: var(--muted); font-size: .75rem; text-align: center; }
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--accent2); color: var(--text); padding: 10px 18px; border-radius: 10px; font-size: .85rem; opacity: 0; pointer-events: none; transition: opacity .3s; }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#127908; Diktierbox</h1>
+  <p>Lokale Spracherkennung (whisper.cpp) &middot; keine Cloud &middot; Daten bleiben im Container</p>
+</header>
+
+<main>
+  <div id="secureBanner" class="banner warn" style="display:none">
+    <strong>Mikrofon-Aufnahme hier nicht m&ouml;glich:</strong> Der Browser erlaubt Mikrofon nur bei HTTPS oder
+    http://localhost &ndash; nicht bei http://&lt;LXC-IP&gt;. <br>
+    <strong>L&ouml;sungen:</strong> (1) Datei-Upload unten verwenden (auf jedem Ger&auml;t funktioniert),
+    (2) SSH-Tunnel: <code>ssh -L 8080:localhost:8080 root@LXC-IP</code> und <code>http://localhost:8080</code> &ouml;ffnen,
+    (3) die HTTP-API <code>POST /api/transcribe</code> aus eigenen Skripten/Shortcuts nutzen.
+  </div>
+
+  <section class="card">
+    <h2>Aufnahme</h2>
+    <div class="row">
+      <button id="recBtn" class="primary">&#127908; Aufnehmen (Klick = Start/Stopp)</button>
+      <label class="hint" id="recState">Bereit.</label>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <input type="file" id="fileInput" accept="audio/*,video/webm,video/mp4" style="display:none">
+      <button id="fileBtn">&#128194; Audiodatei w&auml;hlen &amp; transkribieren</button>
+      <span class="hint">webm/ogg/mp3/m4a/wav/flac &hellip; (ffmpeg konvertiert automatisch)</span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Transkript <span id="transcribeState" class="status"></span></h2>
+    <div class="row" style="margin-bottom:10px">
+      <select id="modelSel" title="Aktives Modell"></select>
+      <select id="langSel" title="Sprache">
+        <option value="auto">Sprache: automatisch</option>
+        <option value="de">Deutsch</option>
+        <option value="en">Englisch</option>
+        <option value="fr">Franz&ouml;sisch</option>
+        <option value="es">Spanisch</option>
+        <option value="it">Italienisch</option>
+        <option value="tr">T&uuml;rkisch</option>
+        <option value="ru">Russisch</option>
+      </select>
+      <button id="copyBtn" disabled>&#128203; Kopieren</button>
+      <button id="clearBtn" disabled>&#128465; Leeren</button>
+    </div>
+    <div id="result" class="empty">Noch kein Transkript &ndash; aufnehmen oder Datei hochladen.</div>
+  </section>
+
+  <section class="card">
+    <h2>Modelle verwalten <span id="modelsState" class="status"></span></h2>
+    <p class="hint">Dieselben Whisper-Modelle wie die Handy-App (blob.handy.computer). RAM-Angaben sind Richtwerte f&uuml;r CPU-Inferenz.</p>
+    <div id="modelsList"></div>
+  </section>
+
+  <section class="card">
+    <h2>Historie <span class="hint">(letzte Eintr&auml;ge, Klick auf Text = kopieren)</span></h2>
+    <div id="history"><span class="empty">L&auml;dt &hellip;</span></div>
+  </section>
+
+  <section class="card">
+    <h2>API (f&uuml;r andere Ger&auml;te / Automatisierung)</h2>
+    <p class="hint" style="margin:0 0 8px">F&uuml;r eigene Shortcuts, Skripte, n8n, Home Assistant &hellip;:</p>
+    <pre class="hint" style="white-space:pre-wrap;margin:0;background:var(--panel2);padding:12px;border-radius:10px;border:1px solid var(--border)">curl -s -F "file=@sprachmemo.webm" http://LXC-IP:8080/api/transcribe | jq -r .text
+curl -s http://LXC-IP:8080/api/health          # Health-Check
+curl -s http://LXC-IP:8080/api/models          # Modelle + Download-Status</pre>
+  </section>
+</main>
+
+<footer>Diktierbox &middot; Engine: whisper.cpp &middot; Modelle: Handys &ouml;ffentliche Whisper-Modelle &middot; <a style="color:var(--muted)" href="/api/health">/api/health</a></footer>
+<div id="toast" class="toast"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const state = { recorder: null, chunks: [], recording: false, lastText: "" };
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  setTimeout(() => t.classList.remove("show"), 2500);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); toast("In Zwischenablage kopiert"); }
+  catch { // Fallback für Nicht-Secure-Context
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    document.execCommand("copy"); ta.remove(); toast("In Zwischenablage kopiert");
+  }
+}
+function fmtErr(e) {
+  if (e && e.detail) {
+    if (typeof e.detail === "object" && e.detail.error) {
+      return `${e.detail.error} (Exit ${e.detail.exit_code}): ${(e.detail.stderr || "").slice(0, 300)}`;
+    }
+    return typeof e.detail === "string" ? e.detail : JSON.stringify(e.detail);
+  }
+  return JSON.stringify(e);
+}
+
+// ---- Konfiguration laden ----
+async function loadConfig() {
+  const cfg = await (await fetch("/api/config")).json();
+  $("langSel").value = cfg.language || "auto";
+  await refreshModels(cfg.model);
+}
+
+// ---- Modelle ----
+async function refreshModels(active) {
+  const data = await (await fetch("/api/models")).json();
+  const sel = $("modelSel"); sel.innerHTML = "";
+  for (const m of data.models) {
+    const o = document.createElement("option");
+    o.value = m.name; o.textContent = `${m.label} (${m.size_mb} MB)`;
+    if (!m.present) o.textContent += " – nicht geladen";
+    o.disabled = !m.present;
+    sel.appendChild(o);
+  }
+  if (active && data.models.some(m => m.name === active && m.present)) sel.value = active;
+  else if (data.active_model) { try { sel.value = data.active_model; } catch {} }
+  const list = $("modelsList"); list.innerHTML = "";
+  for (const m of data.models) {
+    const row = document.createElement("div"); row.className = "model-row";
+    const left = document.createElement("div");
+    left.innerHTML = `<strong>${m.label}</strong> <span class="meta">&middot; ${m.size_mb} MB &middot; ~${m.ram_mb} MB RAM</span><br>
+      <span class="meta">${m.name}</span>`;
+    const right = document.createElement("div"); right.className = "row";
+    const pill = document.createElement("span");
+    if (m.state === "running") {
+      pill.className = "pill run"; pill.textContent = `Download ${m.progress}%`;
+      const p = document.createElement("div"); p.className = "progress";
+      const bar = document.createElement("div"); bar.style.width = (m.progress || 0) + "%"; p.appendChild(bar);
+      right.append(pill, p);
+      setTimeout(refreshModels, 2000);
+    } else if (m.state === "error") {
+      pill.className = "pill err"; pill.textContent = "Fehler";
+      right.append(pill);
+      const err = document.createElement("span"); err.className = "hint"; err.style.maxWidth = "260px";
+      err.textContent = m.error || ""; right.append(err);
+    } else if (m.present && m.valid) {
+      pill.className = "pill ok"; pill.textContent = "geladen";
+      right.append(pill);
+      if (sel.value !== m.name) {
+        const del = document.createElement("button"); del.textContent = "Löschen"; del.className = "danger";
+        del.onclick = async () => {
+          if (!confirm(`Modell ${m.label} wirklich löschen?`)) return;
+          const r = await fetch(`/api/models/${encodeURIComponent(m.name)}`, { method: "DELETE" });
+          if (!r.ok) { toast(fmtErr(await r.json())); return; }
+          toast("Modell gelöscht"); refreshModels();
+        };
+        right.append(del);
+      }
+    } else {
+      pill.className = "pill"; pill.textContent = m.present ? "unvollständig" : "nicht geladen";
+      const dl = document.createElement("button"); dl.textContent = `Herunterladen (${m.size_mb} MB)`;
+      dl.onclick = async () => {
+        dl.disabled = true; dl.innerHTML = '<span class="spin"></span>Startet…';
+        const r = await fetch("/api/models/download", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: m.name }),
+        });
+        if (!r.ok) { toast(fmtErr(await r.json())); dl.disabled = false; dl.textContent = "Herunterladen"; return; }
+        toast("Download gestartet"); refreshModels();
+      };
+      right.append(pill, dl);
+    }
+    row.append(left, right); list.appendChild(row);
+  }
+}
+
+// ---- Modell/Sprache wechseln ----
+$("modelSel").onchange = async (e) => {
+  const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: e.target.value }) });
+  if (!r.ok) { toast(fmtErr(await r.json())); loadConfig(); return; }
+  toast("Aktives Modell: " + e.target.selectedOptions[0].textContent.split(" (")[0]);
+};
+$("langSel").onchange = async (e) => {
+  const r = await fetch("/api/config", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ language: e.target.value }) });
+  if (!r.ok) { toast(fmtErr(await r.json())); return; }
+};
+
+// ---- Aufnahme ----
+if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+  $("secureBanner").style.display = "block";
+  $("recBtn").disabled = true;
+  $("recState").textContent = "Mikrofon hier blockiert (HTTP) – Upload oder SSH-Tunnel nutzen.";
+}
+$("recBtn").onclick = async () => {
+  if (state.recording) { state.recorder.stop(); return; }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    state.chunks = [];
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "";
+    state.recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    state.recorder.ondataavailable = (ev) => { if (ev.data.size) state.chunks.push(ev.data); };
+    state.recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      state.recording = false;
+      $("recBtn").classList.remove("rec"); $("recBtn").innerHTML = "&#127908; Aufnehmen (Klick = Start/Stopp)";
+      $("recState").textContent = "Verarbeite Aufnahme …";
+      const blob = new Blob(state.chunks, { type: state.recorder.mimeType || "audio/webm" });
+      await sendAudio(blob, `aufnahme-${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.webm`);
+      $("recState").textContent = "Bereit.";
+    };
+    state.recorder.start();
+    state.recording = true;
+    $("recBtn").classList.add("rec"); $("recBtn").textContent = "\u25A0 Stopp & transkribieren";
+    $("recState").textContent = "Aufnahme läuft … sprich jetzt.";
+  } catch (err) {
+    $("recState").textContent = "";
+    toast("Mikrofon-Zugriff fehlgeschlagen: " + err.name + " – " + err.message);
+  }
+};
+
+// ---- Datei-Upload ----
+$("fileBtn").onclick = () => $("fileInput").click();
+$("fileInput").onchange = async () => {
+  const f = $("fileInput").files[0];
+  if (!f) return;
+  await sendAudio(f, f.name);
+  $("fileInput").value = "";
+};
+
+async function sendAudio(blob, filename) {
+  const st = $("transcribeState");
+  st.innerHTML = '<span class="spin"></span>Transkribiere …';
+  st.className = "status";
+  try {
+    const fd = new FormData();
+    fd.append("file", blob, filename);
+    const t0 = performance.now();
+    const r = await fetch("/api/transcribe", { method: "POST", body: fd });
+    const data = await r.json();
+    if (!r.ok) throw data;
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    state.lastText = data.text || "";
+    const box = $("result"); box.classList.remove("empty"); box.innerHTML = "";
+    if (data.segments && data.segments.length) {
+      for (const s of data.segments) {
+        const span = document.createElement("span"); span.className = "seg";
+        const t = document.createElement("time");
+        const m = Math.floor(s.start / 60), sec = Math.round(s.start % 60);
+        t.textContent = `${String(m).padStart(2,"0")}:${String(sec).padStart(2,"0")}`;
+        span.append(t, document.createTextNode(s.text));
+        box.appendChild(span);
+      }
+    } else {
+      box.textContent = data.text || "(kein Text erkannt)";
+    }
+    st.className = "status ok";
+    st.textContent = `fertig in ${secs}s · Modell ${data.model} · Sprache ${data.language} · Audio ${data.audio_seconds}s → ${data.elapsed_seconds}s`;
+    $("copyBtn").disabled = !data.text; $("clearBtn").disabled = false;
+    loadHistory();
+  } catch (e) {
+    st.className = "status err";
+    st.textContent = "Fehler: " + fmtErr(e);
+  }
+}
+
+$("copyBtn").onclick = () => copyText(state.lastText);
+$("clearBtn").onclick = () => {
+  $("result").innerHTML = "Noch kein Transkript – aufnehmen oder Datei hochladen.";
+  $("result").classList.add("empty"); $("copyBtn").disabled = true; $("clearBtn").disabled = true;
+  $("transcribeState").textContent = "";
+};
+
+// ---- Historie ----
+async function loadHistory() {
+  try {
+    const data = await (await fetch("/api/history")).json();
+    const box = $("history"); box.innerHTML = "";
+    if (!data.entries.length) { box.innerHTML = '<span class="empty">Noch keine Eintr&auml;ge.</span>'; return; }
+    for (const e of data.entries.slice(0, 100)) {
+      const div = document.createElement("div"); div.className = "hist-entry";
+      const meta = document.createElement("div"); meta.className = "meta";
+      const d = new Date(e.ts);
+      meta.innerHTML = `<span>${d.toLocaleString("de-DE")}</span><span>${e.model || ""}</span><span>${e.language || ""}</span>${e.filename ? `<span>${e.filename}</span>` : ""}`;
+      const text = document.createElement("div"); text.className = "text";
+      text.textContent = e.text || "(leer)";
+      text.title = "Klick = kopieren";
+      text.onclick = () => copyText(e.text || "");
+      div.append(meta, text); box.appendChild(div);
+    }
+  } catch { $("history").innerHTML = '<span class="empty">Historie nicht verf&uuml;gbar.</span>'; }
+}
+
+loadConfig(); loadHistory();
+</script>
+</body>
+</html>
