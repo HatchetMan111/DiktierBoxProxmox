@@ -47,7 +47,7 @@ NET_GW="${NET_GW:-}"              # z. B. 192.168.1.1
 WEB_PORT="${WEB_PORT:-8080}"
 
 # Modell-Pinning für den Erstdownload (weitere jederzeit per Web-UI nachladbar):
-#   ggml-small.bin (487 MB) | whisper-medium-q4_1.bin (492 MB)
+#   ggml-small.bin (487 MB) | ggml-medium-q5_0.bin (514 MB)
 #   ggml-large-v3-turbo.bin (1600 MB) | ggml-large-v3-q5_0.bin (1100 MB)
 PRELOAD_MODEL="${PRELOAD_MODEL:-ggml-small.bin}"
 # leer → kein Erstdownload, Modelle nur per Web-UI
@@ -312,30 +312,43 @@ preload_model() {
     msg_info "Kein PRELOAD_MODEL gesetzt – Modelle werden später über die Web-UI geladen."
     return 0
   fi
+  # Modell-Quellen mit automatischem Fallback: primär Handys öffentlicher
+  # Blob-Store, alternativ die offiziellen whisper.cpp-Modelle auf HuggingFace
+  # (identische GGML-Dateien für dieselbe Engine).
   local -A model_urls=(
-    [ggml-small.bin]="https://blob.handy.computer/ggml-small.bin"
-    [whisper-medium-q4_1.bin]="https://blob.handy.computer/whisper-medium-q4_1.bin"
-    [ggml-large-v3-turbo.bin]="https://blob.handy.computer/ggml-large-v3-turbo.bin"
-    [ggml-large-v3-q5_0.bin]="https://blob.handy.computer/ggml-large-v3-q5_0.bin"
+    [ggml-small.bin]="https://blob.handy.computer/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin"
+    [ggml-medium-q5_0.bin]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin"
+    [ggml-large-v3-turbo.bin]="https://blob.handy.computer/ggml-large-v3-turbo.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+    [ggml-large-v3-q5_0.bin]="https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin"
   )
-  local url="${model_urls[$PRELOAD_MODEL]:-}"
-  [[ -n "$url" ]] || die "Unbekanntes PRELOAD_MODEL: ${PRELOAD_MODEL}"
-  local dest="/var/lib/diktierbox/models/${PRELOAD_MODEL}"
-  # Mindestgröße je Modell (95 % der erwarteten Größe) für die Gültigkeitsprüfung
   local -A model_min_mb=(
     [ggml-small.bin]=462
-    [whisper-medium-q4_1.bin]=467
+    [ggml-medium-q5_0.bin]=488
     [ggml-large-v3-turbo.bin]=1520
     [ggml-large-v3-q5_0.bin]=1045
   )
+  local url="${model_urls[$PRELOAD_MODEL]:-}"
+  [[ -n "$url" ]] || die "Unbekanntes PRELOAD_MODEL: ${PRELOAD_MODEL} (erlaubt: ${!model_urls[*]})"
+  local dest="/var/lib/diktierbox/models/${PRELOAD_MODEL}"
   if [[ -s "$dest" ]] && [[ "$(stat -c%s "$dest" 2>/dev/null || echo 0)" -ge $(( model_min_mb[$PRELOAD_MODEL] * 1024 * 1024 )) ]]; then
     msg_ok "Whisper-Modell bereits vorhanden: ${PRELOAD_MODEL} ($(( $(stat -c%s "$dest") / 1024 / 1024 )) MB)"
   else
-    msg_info "Lade Modell ${PRELOAD_MODEL} (aus blob.handy.computer, 1-5 Min) …"
+    msg_info "Lade Modell ${PRELOAD_MODEL} (~${model_min_mb[$PRELOAD_MODEL]}+ MB, mehrere Quellen möglich, 1-5 Min) …"
     install -o diktierbox -g diktierbox -m 0644 /dev/null "${dest}.part"
-    if ! runuser -u diktierbox -- curl -fsSL --retry 3 --retry-delay 2 -o "${dest}.part" "$url"; then
+    local dl_ok=0 dl_url
+    for dl_url in $url; do
       rm -f "${dest}.part"
-      die "Modell-Download fehlgeschlagen: $url"
+      msg_info "  Quelle: ${dl_url}"
+      if runuser -u diktierbox -- curl -fsSL --retry 2 --retry-delay 2 --connect-timeout 15 \
+          -o "${dest}.part" "$dl_url"; then
+        dl_ok=1
+        break
+      fi
+      msg_warn "  Quelle fehlgeschlagen – probiere nächste (falls vorhanden)."
+    done
+    if (( dl_ok == 0 )); then
+      rm -f "${dest}.part"
+      die "Modell-Download von allen Quellen fehlgeschlagen (Netz/DNS prüfen; später per Web-UI erneut versuchen)."
     fi
     chown diktierbox:diktierbox "${dest}.part"
     local size_mb
@@ -461,13 +474,20 @@ check_host_prereqs() {
 }
 
 check_upstream_reachable() {
+  # GitHub ist Pflicht (App-Code/whisper.cpp kommen von dort). Die Modell-
+  # Quellen werden NICHT fatal geprüft: blob.handy.computer ist immer wieder
+  # mal nicht erreichbar; dann weicht der Download automatisch auf die
+  # offiziellen whisper.cpp-Modelle (HuggingFace) aus.
   if ! curl -fsSL --max-time 15 --retry 2 "https://api.github.com/repos/${UPSTREAM_WHISPER_REPO}" >/dev/null; then
     die "GitHub (${UPSTREAM_WHISPER_REPO}) nicht erreichbar – Verbindung prüfen."
   fi
-  if ! curl -fsSL --max-time 15 --retry 2 -r 0-0 "https://blob.handy.computer/ggml-small.bin" >/dev/null; then
-    die "blob.handy.computer nicht erreichbar – Modell-Download später prüfen."
+  msg_ok "GitHub erreichbar (whisper.cpp-Quelle)."
+  if curl -fsSL --max-time 10 --retry 1 -r 0-0 "https://blob.handy.computer/ggml-small.bin" >/dev/null 2>&1; then
+    msg_ok "blob.handy.computer erreichbar (Modell-Primärquelle)."
+  else
+    msg_warn "blob.handy.computer NICHT erreichbar – Modell-Download nutzt automatisch"
+    msg_warn "den HuggingFace-Fallback (ggerganov/whisper.cpp, identische GGML-Dateien)."
   fi
-  msg_ok "Upstream-Quellen erreichbar (github.com, blob.handy.computer)."
 }
 
 find_ct_by_name() {

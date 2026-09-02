@@ -57,30 +57,42 @@ DEFAULT_MODEL = os.environ.get("DIKTIERBOX_DEFAULT_MODEL", "ggml-small.bin")
 DEFAULT_LANGUAGE = os.environ.get("DIKTIERBOX_LANGUAGE", "auto")
 ALLOW_UNSAFE_WHISPER = os.environ.get("DIKTIERBOX_ALLOW_UNSAFE", "1") == "1"
 
-# Handys öffentliche Whisper-Modell-URLs (README "Manual Model Installation").
-# Schlüssel = Dateiname im models/-Ordner, exakt wie bei Handy.
+# Modell-Quellen: primär Handys öffentliche Whisper-Modelle (blob.handy.computer),
+# Fallback die offiziellen whisper.cpp-Modelle auf HuggingFace (gggerganov/whisper.cpp)
+# – identische GGML-Dateien, werden von derselben Engine gelesen.
+# Schlüssel = Dateiname im models/-Ordner.
 MODELS: dict[str, dict[str, Any]] = {
     "ggml-small.bin": {
         "label": "Whisper Small",
-        "url": "https://blob.handy.computer/ggml-small.bin",
+        "urls": [
+            "https://blob.handy.computer/ggml-small.bin",
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin",
+        ],
         "size_mb": 487,
         "ram_mb": 900,
     },
-    "whisper-medium-q4_1.bin": {
-        "label": "Whisper Medium (q4_1)",
-        "url": "https://blob.handy.computer/whisper-medium-q4_1.bin",
-        "size_mb": 492,
-        "ram_mb": 1600,
+    "ggml-medium-q5_0.bin": {
+        "label": "Whisper Medium (q5_0)",
+        "urls": [
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+        ],
+        "size_mb": 514,
+        "ram_mb": 1700,
     },
     "ggml-large-v3-turbo.bin": {
         "label": "Whisper Large v3 Turbo",
-        "url": "https://blob.handy.computer/ggml-large-v3-turbo.bin",
+        "urls": [
+            "https://blob.handy.computer/ggml-large-v3-turbo.bin",
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin",
+        ],
         "size_mb": 1600,
         "ram_mb": 3600,
     },
     "ggml-large-v3-q5_0.bin": {
         "label": "Whisper Large v3 (q5_0)",
-        "url": "https://blob.handy.computer/ggml-large-v3-q5_0.bin",
+        "urls": [
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-q5_0.bin",
+        ],
         "size_mb": 1100,
         "ram_mb": 2800,
     },
@@ -188,37 +200,36 @@ def download_model(name: str) -> None:
         dest = model_path(name)
         part = Path(f"{dest}.part")
         total = info["size_mb"] * 1024 * 1024
+        errors: list[str] = []
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            if part.exists():
-                part.unlink()
-            # curl statt urllib/requests: robuster bei großen Dateien, zeigt
-            # Fortschritt über stderr und unterstützt Resume/Retry.
-            cmd = [
-                "curl", "-fsSL", "--retry", "3", "--retry-delay", "2",
-                "--connect-timeout", "15", "-o", str(part), info["url"],
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-            last = 0.0
-            while proc.poll() is None:
-                try:
-                    cur = part.stat().st_size
-                except OSError:
-                    cur = 0
-                with _downloads_lock:
-                    DOWNLOADS[name]["progress"] = round(min(cur / total, 1.0) * 100, 1)
-                if cur == last and time.monotonic() - last > 0:
-                    pass
-                last = cur
-                time.sleep(0.5)
-            stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
-            if proc.returncode != 0:
-                raise RuntimeError(f"curl Exit-Code {proc.returncode}: {stderr.strip()[:500] or 'keine Meldung'}")
-            if not is_probably_valid_model(part, info["size_mb"]):
-                raise RuntimeError(
-                    f"Heruntergeladene Datei zu klein/ungültig: {part.stat().st_size} Bytes "
-                    f"(erwartet ≥ {info['size_mb']} MB) – Quelle prüfen."
-                )
+            # curl statt urllib/requests: robuster bei großen Dateilen, zeigt
+            # Fortschritt über stderr und unterstützt Retry.
+            # Nacheinander alle Quellen probieren (primär blob.handy.computer,
+            # Fallback HuggingFace), bis eine liefert.
+            for url in info["urls"]:
+                if part.exists():
+                    part.unlink()
+                cmd = [
+                    "curl", "-fsSL", "--retry", "2", "--retry-delay", "2",
+                    "--connect-timeout", "15", "-o", str(part), url,
+                ]
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                while proc.poll() is None:
+                    try:
+                        cur = part.stat().st_size
+                    except OSError:
+                        cur = 0
+                    with _downloads_lock:
+                        DOWNLOADS[name]["progress"] = round(min(cur / total, 1.0) * 100, 1)
+                    time.sleep(0.5)
+                stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+                if proc.returncode == 0 and is_probably_valid_model(part, info["size_mb"]):
+                    break  # erfolgreich
+                errors.append(f"{url} → curl rc={proc.returncode}: {stderr.strip()[:200] or 'Datei zu klein/ungültig'}")
+                log.warning("Modell-Download von %s fehlgeschlagen, probiere nächste Quelle: %s", url, errors[-1])
+            else:
+                raise RuntimeError("Alle Quellen fehlgeschlagen: " + " | ".join(errors[:3]))
             part.replace(dest)
             with _downloads_lock:
                 DOWNLOADS[name] = {"state": "done", "progress": 100.0, "error": None}
@@ -407,7 +418,7 @@ def list_models() -> dict[str, Any]:
             "label": info["label"],
             "size_mb": info["size_mb"],
             "ram_mb": info["ram_mb"],
-            "url": info["url"],
+            "urls": info["urls"],
             "present": present,
             "valid": valid,
             **DOWNLOADS.get(name, {"state": "idle", "progress": 0.0, "error": None}),
