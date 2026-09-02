@@ -45,6 +45,9 @@ NET_CIDR="${NET_CIDR:-}"          # z. B. 192.168.1.100/24 (bei NET_MODE=static)
 NET_GW="${NET_GW:-}"              # z. B. 192.168.1.1
 
 WEB_PORT="${WEB_PORT:-8080}"
+# HTTPS-Port für die Web-UI mit Mikrofon (selbstsigniertes Zertifikat wird
+# bei der Installation erzeugt; Browser-Regel: getUserMedia nur bei HTTPS).
+TLS_PORT="${TLS_PORT:-8443}"
 
 # Modell-Pinning für den Erstdownload (weitere jederzeit per Web-UI nachladbar):
 #   ggml-small.bin (487 MB) | ggml-medium-q5_0.bin (514 MB)
@@ -276,6 +279,7 @@ install_webapp() {
   msg_info "Lade App-Code aus HatchetMan111/DiktierBoxProxmox …"
   mkdir -p /opt/diktierbox/static
   fetch_to "${base}/server.py" /opt/diktierbox/server.py
+  fetch_to "${base}/tls_proxy.py" /opt/diktierbox/tls_proxy.py
   fetch_to "${base}/static/index.html" /opt/diktierbox/static/index.html
   msg_ok "App-Code installiert nach /opt/diktierbox."
 
@@ -381,11 +385,89 @@ preload_model() {
 
 start_service() {
   write_systemd_unit
+  write_tls_certificate
+  write_tls_systemd_unit
   systemctl daemon-reload
   systemctl enable ${APP_ID} >/dev/null 2>&1 || true
-  msg_ok "${APP_ID}.service aktiviert (Autostart beim Boot, Restart=always)."
-  msg_info "(Re)starte Service …"
+  systemctl enable ${APP_ID}-tls >/dev/null 2>&1 || true
+  msg_ok "Services aktiviert (${APP_ID}, ${APP_ID}-tls; Autostart, Restart=always)."
+  msg_info "(Re)starte Services …"
   systemctl restart ${APP_ID}
+  systemctl restart ${APP_ID}-tls
+}
+
+write_tls_certificate() {
+  # Selbstsigniertes Zertifikat mit LAN-IPs im SAN, damit Browser das
+  # Mikrofon freigeben (getUserMedia braucht Secure Context = HTTPS).
+  # Beim ersten Aufruf: Zertifikatwarnung einmalig bestätigen ("Erweitert
+  # → Weiter"). Nach CT-IP-Wechsel (DHCP) einfach neu generieren:
+  #   rm -f /var/lib/diktierbox/tls/* && systemctl restart diktierbox-tls
+  local tls_dir="/var/lib/diktierbox/tls"
+  if [[ -s "${tls_dir}/cert.pem" && -s "${tls_dir}/key.pem" ]] \
+     && openssl x509 -in "${tls_dir}/cert.pem" -noout -checkend $((60*60*24*30)) >/dev/null 2>&1; then
+    msg_ok "TLS-Zertifikat bereits vorhanden und gültig (>30 Tage)."
+    return 0
+  fi
+  msg_info "Erzeuge selbstsigniertes TLS-Zertifikat (gültig 10 Jahre, SAN: LAN-IPs + localhost) …"
+  install -d -o diktierbox -g diktierbox -m 0750 "$tls_dir"
+  local ip="${CT_IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+  local san="DNS:localhost,IP:127.0.0.1"
+  [[ -n "$ip" && "$ip" != "127.0.0.1" ]] && san="${san},IP:${ip}"
+  # Zusätzlich die CT-IP im CN, falls SAN-Felder ignoriert werden
+  if ! openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      -keyout "${tls_dir}/key.pem" -out "${tls_dir}/cert.pem" \
+      -subj "/CN=${ip:-diktierbox}" \
+      -addext "subjectAltName=${san}" >/dev/null 2>&1; then
+    # Fallback für ältere OpenSSL ohne -addext
+    local cnf="${tls_dir}/san.cnf"
+    printf '[req]\ndistinguished_name=dn\nx509_extensions=v3\n[dn]\nCN=%s\n[v3]\nsubjectAltName=%s\n' \
+      "${ip:-diktierbox}" "$san" > "$cnf"
+    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+      -keyout "${tls_dir}/key.pem" -out "${tls_dir}/cert.pem" \
+      -config "$cnf" >/dev/null 2>&1 \
+      || die "Konnte TLS-Zertifikat nicht erzeugen (openssl)."
+    rm -f "$cnf"
+  fi
+  chown diktierbox:diktierbox "${tls_dir}/cert.pem" "${tls_dir}/key.pem"
+  chmod 0600 "${tls_dir}/key.pem"
+  msg_ok "TLS-Zertifikat erzeugt (SAN: ${san})."
+}
+
+write_tls_systemd_unit() {
+  msg_info "Installiere systemd-Unit ${APP_ID}-tls.service (HTTPS-Reverse-Proxy auf :${TLS_PORT}) …"
+  cat > /etc/systemd/system/${APP_ID}-tls.service <<UNIT
+[Unit]
+Description=Diktierbox – HTTPS-Frontend (Mikrofon benötigt Secure Context)
+Documentation=https://github.com/HatchetMan111/DiktierBoxProxmox
+After=network-online.target ${APP_ID}.service
+Wants=network-online.target
+Requires=${APP_ID}.service
+
+[Service]
+Type=simple
+User=diktierbox
+Group=diktierbox
+WorkingDirectory=/opt/diktierbox
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/var/lib/diktierbox
+# openssl s_server als minimaler TLS-Terminator mit Reverse-Proxy nach RFC 1912:
+# Nicht nötig – Python stdlib macht das sauberer (ssl + urllib-Proxy).
+ExecStart=/opt/diktierbox/venv/bin/python /opt/diktierbox/tls_proxy.py --listen 0.0.0.0:${TLS_PORT} --upstream http://127.0.0.1:${WEB_PORT} --cert /var/lib/diktierbox/tls/cert.pem --key /var/lib/diktierbox/tls/key.pem
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=full
+ReadOnlyPaths=/opt/diktierbox
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  chmod 644 /etc/systemd/system/${APP_ID}-tls.service
+  msg_ok "systemd-Unit ${APP_ID}-tls.service installiert."
 }
 
 write_systemd_unit() {
@@ -424,6 +506,26 @@ verify_service_and_web() {
     die "Dienst lauscht nur auf 127.0.0.1 -> von außerhalb NICHT erreichbar!"
   fi
   msg_ok "Dienst lauscht korrekt: $(echo "$bind_line" | awk '{print $4}')"
+
+  # HTTPS-Frontend verifizieren (Mikrofon braucht Secure Context)
+  require_active_unit "${APP_ID}-tls" || die "${APP_ID}-tls-Service läuft nicht – Diagnose siehe oben."
+  msg_info "Warte auf HTTPS-Frontend unter 127.0.0.1:${TLS_PORT} (max. 45 s) …"
+  local tls_code
+  if ! tls_code="$(curl -ksS -o /dev/null -w '%{http_code}' --max-time 10 "https://127.0.0.1:${TLS_PORT}/api/health" 2>/dev/null)" \
+     || [[ "$tls_code" != "200" ]]; then
+    journalctl --no-pager -n 30 -u ${APP_ID}-tls 2>&1 || true
+    msg_warn "HTTPS-Frontend antwortet nicht (Code: ${tls_code:-keiner}) – HTTP :${WEB_PORT} funktioniert weiter."
+    msg_warn "Mikrofon-Aufnahme braucht aber HTTPS – Diagnose: journalctl -u ${APP_ID}-tls -e"
+    return 0
+  fi
+  msg_ok "HTTPS-Frontend antwortet auf :${TLS_PORT}/api/health (HTTP 200 über TLS)."
+  local tls_bind
+  tls_bind="$(ss -tlnp 2>/dev/null | grep ":${TLS_PORT} " || true)"
+  if echo "$tls_bind" | grep -q "127.0.0.1:${TLS_PORT}"; then
+    msg_warn "HTTPS lauscht nur auf 127.0.0.1 – von außen nicht erreichbar (expected: 0.0.0.0)."
+  else
+    msg_ok "HTTPS lauscht korrekt: $(echo "$tls_bind" | awk '{print $4}')"
+  fi
 }
 
 print_guest_summary() {
@@ -434,6 +536,7 @@ print_guest_summary() {
   ${APP_NAME} wurde erfolgreich installiert ✔
 =========================================================
   Web-UI      :  http://${ip}:${WEB_PORT}
+  Mikrofon    :  https://${ip}:${TLS_PORT}  (Zertifikatwarnung 1x bestätigen)
   Engine      :  whisper-cli $(/usr/local/bin/whisper-cli --version 2>&1 | head -n1 || echo '') (CPU)
   Modell      :  $(find /var/lib/diktierbox/models -maxdepth 1 -type f -printf '%f ' 2>/dev/null)
   Container   :  unprivileged LXC, onboot=1
@@ -703,6 +806,7 @@ run_guest_phase() {
       DB_PHASE=guest \
       MODE="$MODE" \
       WEB_PORT="$WEB_PORT" \
+      TLS_PORT="$TLS_PORT" \
       PRELOAD_MODEL="$PRELOAD_MODEL" \
       CT_IP="$CT_IP" \
       DEBUG="$DEBUG" \
@@ -867,6 +971,7 @@ BANNER
   Installation abgeschlossen ✔   —   Diktierbox: Diktieren. Lokal. Fertig.
 ------------------------------------------------------------------------
   Web-UI   :  http://${CT_IP}:${WEB_PORT}
+  Mikrofon :  https://${CT_IP}:${TLS_PORT}  (Zertifikatwarnung 1x bestätigen → Mikrofon frei)
   Container:  ${APP_ID} (ID ${CTID}, unprivileged, onboot=1)
   Einstieg :  pct enter ${CTID}
   Update   :  Einzeiler erneut ausführen (erkennt den Container automatisch)

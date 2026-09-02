@@ -68,7 +68,8 @@ bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/DiktierBo
 | `CTID` | nächste freie ID | Container-ID |
 | `VAR_CPU` / `VAR_RAM` / `VAR_DISK` | 2 / 2048 / 12 | vCPU / MB RAM / GB Disk |
 | `PRELOAD_MODEL` | `ggml-small.bin` | Erstdownload (leer = nur per Web-UI laden) |
-| `WEB_PORT` | `8080` | Web-UI-Port |
+| `WEB_PORT` | `8080` | Web-UI-Port (HTTP) |
+| `TLS_PORT` | `8443` | HTTPS-Port für Mikrofon-Aufnahme |
 | `STORAGE` | automatisch | Storage mit `rootdir`-Inhalt |
 | `BRIDGE` | `vmbr0` | Netzwerk-Bridge |
 | `NET_MODE`/`NET_CIDR`/`NET_GW` | `dhcp` | statische IP statt DHCP |
@@ -85,8 +86,26 @@ beim Installieren mitgeben.
 ### Web-UI öffnen
 
 ```
-http://<LXC-IP>:8080
+http://<LXC-IP>:8080     # Upload, Historie, Modelle, API (überall nutzbar)
+https://<LXC-IP>:8443    # MIT Mikrofon-Aufnahme (Secure Context)
 ```
+
+**Mikrofon über HTTPS (Port 8443):** Der Installer erzeugt automatisch ein
+selbstsigniertes Zertifikat (10 Jahre, SAN mit der Container-IP) und einen
+zweiten systemd-Service (`diktierbox-tls`), der als HTTPS-Frontend vor der
+Web-UI läuft. Beim ersten Aufruf von `https://<LXC-IP>:8443` einmal die
+Browser-Warnung bestätigen („Erweitert → Weiter“) – danach steht das Mikrofon
+auf jedem Gerät im Heimnetz zur Verfügung.
+
+> **Warum HTTPS?** Browser erlauben `getUserMedia` (Mikrofon) ausschließlich
+> in einem *Secure Context* – HTTPS oder `http://localhost`. Das gilt auch im
+> privaten Heimnetz ohne Ausnahme. Die Sperrung sitzt im Browser, nicht im
+> Server; daher bringt der Installer das Zertifikat gleich mit.
+>
+> IP-Wechsel des Containers (DHCP): Zertifikat neu erzeugen mit
+> `rm -f /var/lib/diktierbox/tls/* && systemctl restart diktierbox-tls`
+> (der Installer legt die aktuelle IP ins SAN) oder feste IP setzen
+> (`NET_MODE=static NET_CIDR=… NET_GW=…`).
 
 Funktionen der Web-UI (deutsch):
 
@@ -117,18 +136,15 @@ curl -X POST -H 'Content-Type: application/json' \
 
 Weboberfläche + OpenAPI-Doku: `http://LXC-IP:8080/api/docs`
 
-### Mikrofon über HTTP nutzen (Browser-Regel)
+### Mikrofon ohne HTTPS nutzen (Alternative)
 
-Browser erlauben `getUserMedia` nur bei **HTTPS** oder **`http://localhost`**.
-Drei Möglichkeiten ohne HTTPS-Zertifikat:
-
-1. **SSH-Tunnel** (empfohlen, Mikrofon läuft dann lokal im Browser):
+1. **SSH-Tunnel** (localhost zählt als Secure Context):
    ```bash
    ssh -L 8080:localhost:8080 root@<LXC-IP>
    # dann im Browser: http://localhost:8080
    ```
-2. **Datei-Upload** statt Mikrofon (funktioniert überall, auch übers LAN)
-3. **API** aus eigenen Skripten/Shortcuts (z. B. iOS-Shortcut → WebDAV → curl)
+2. **Datei-Upload** statt Mikrofon (funktioniert überall)
+3. **API** aus eigenen Skripten/Shortcuts
 
 ---
 
@@ -185,12 +201,13 @@ neu gebaut, wenn es fehlt.
 install/diktierbox.sh      # Proxmox-Installer (Community-Scripts-Stil, Host-+Gast-Phase)
 install/diktierbox.service # systemd-Unit (identischer Stand wird installiert)
 app/server.py              # FastAPI-Backend (ffmpeg → whisper-cli, Modelle, Historie)
+app/tls_proxy.py           # HTTPS-Frontend (stdlib; macht Mikrofon im Browser möglich)
 app/static/index.html      # Web-UI (vanilla HTML/CSS/JS, deutsch)
 ```
 
 Dauerhafte Pfade im Container: App `/opt/diktierbox` · Daten `/var/lib/diktierbox`
-(Modelle, tmp, Historie, config.json) · Logs `journalctl -u diktierbox` +
-`/var/log/diktierbox-install.log` (Installation).
+(Modelle, tmp, Historie, config.json, TLS-Zertifikat) · Logs `journalctl -u diktierbox`
+bzw. `-u diktierbox-tls` + `/var/log/diktierbox-install.log` (Installation).
 
 ---
 
@@ -205,6 +222,7 @@ Dauerhafte Pfade im Container: App `/opt/diktierbox` · Daten `/var/lib/diktierb
 | `GET /api/health` | `{"status":"ok",...}` HTTP 200 |
 | `POST /api/transcribe` (jfk.wav, 16 kHz WAV) | korrektes Transkript, HTTP 200 |
 | `POST /api/transcribe` (jfk.webm, opus – Browser-Mikrofonformat) | korrektes Transkript, HTTP 200 |
+| HTTPS-Frontend (tls_proxy): Health + komplette Transkription über TLS | HTTP 200, identisches Transkript |
 | Health/Models **während** laufender Inferenz | 200 in ~3 ms (Event-Loop blockiert nicht) |
 | Ungültige Audiodatei | HTTP 400 + vollständige ffmpeg-Fehlermeldung |
 | Nicht geladenes Modell aktivieren | HTTP 409 mit klaren Detailtext |

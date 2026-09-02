@@ -79,9 +79,11 @@
   <div id="secureBanner" class="banner warn" style="display:none">
     <strong>Mikrofon-Aufnahme hier nicht m&ouml;glich:</strong> Der Browser erlaubt Mikrofon nur bei HTTPS oder
     http://localhost &ndash; nicht bei http://&lt;LXC-IP&gt;. <br>
-    <strong>L&ouml;sungen:</strong> (1) Datei-Upload unten verwenden (auf jedem Ger&auml;t funktioniert),
-    (2) SSH-Tunnel: <code>ssh -L 8080:localhost:8080 root@LXC-IP</code> und <code>http://localhost:8080</code> &ouml;ffnen,
-    (3) die HTTP-API <code>POST /api/transcribe</code> aus eigenen Skripten/Shortcuts nutzen.
+    <strong>L&ouml;sung:</strong> Diese Seite einfach &uuml;ber <b>HTTPS</b> &ouml;ffnen:
+    <code>https://LXC-IP:8443</code> &ndash; beim ersten Aufruf die Zertifikatwarnung best&auml;tigen
+    (selbstsigniertes Zertifikat aus dem Installer; einmalig pro Ger&auml;t/Browser).
+    Alternativen: Datei-Upload unten (funktioniert immer) oder die HTTP-API
+    <code>POST /api/transcribe</code> f&uuml;r eigene Skripte/Shortcuts.
   </div>
 
   <section class="card">
@@ -252,9 +254,17 @@ $("langSel").onchange = async (e) => {
 
 // ---- Aufnahme ----
 if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-  $("secureBanner").style.display = "block";
-  $("recBtn").disabled = true;
-  $("recState").textContent = "Mikrofon hier blockiert (HTTP) – Upload oder SSH-Tunnel nutzen.";
+  if (location.protocol === "https:" || location.hostname === "localhost" || location.hostname === "127.0.0.1") {
+    // Secure Context, aber mediaDevices fehlt (sehr alter Browser)
+    $("recBtn").disabled = true;
+    $("recState").textContent = "Dieser Browser unterstützt keine Mikrofon-Aufnahme.";
+  } else {
+    $("secureBanner").style.display = "block";
+    const hint = $("secureBanner").querySelector("code");
+    if (hint && location.port) hint.textContent = `https://${location.hostname}:8443`;
+    $("recBtn").disabled = true;
+    $("recState").innerHTML = 'Mikrofon hier blockiert (HTTP) – <b>https://' + location.hostname + ':8443</b> öffnen für Mikrofon-Aufnahme oder Upload nutzen.';
+  }
 }
 $("recBtn").onclick = async () => {
   if (state.recording) { state.recorder.stop(); return; }
